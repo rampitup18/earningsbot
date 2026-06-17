@@ -1,0 +1,30 @@
+name: EarningsBot Daily Scan
+
+on:
+  schedule:
+    # 6:30 AM ET (10:30 UTC during EDT / 11:30 UTC during EST)
+    - cron: "30 10 * * 1-5"
+  workflow_dispatch: # manual trigger from GitHub UI
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run EarningsBot
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          PORTFOLIO_SIZE: "10000"
+          MAX_RISK_PCT: "0.01"
+          CLAUDE_ANALYZER_MODEL: "claude-opus-4-8"
+        run: python main.py
