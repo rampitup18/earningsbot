@@ -141,9 +141,9 @@ def analyze_with_claude(
                 model=model,
                 max_tokens=512,
                 system=(
-                    "You are an expert options trader specializing in pre-earnings setups. "
-                    "Analyze the provided market data and recommend a single trade action. "
-                    "Be decisive and data-driven. Respond with valid JSON only — no markdown."
+                    "Analyze the provided pre-earnings market data. "
+                    "Recommend a single trade action based strictly on the numbers. "
+                    "Respond with valid JSON only — no markdown."
                 ),
                 messages=[{"role": "user", "content": prompt}],
                 output_format=_Output,
