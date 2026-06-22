@@ -1,5 +1,4 @@
 from __future__ import annotations
-import os
 from dataclasses import dataclass
 from datetime import date
 
@@ -134,17 +133,22 @@ def analyze_with_claude(
         ticker, earnings_date, spot, options, hv30, hist_moves, hist_summary, closes
     )
 
+    from utils import retry_with_backoff
+
     try:
-        response = client.messages.parse(
-            model=model,
-            max_tokens=512,
-            system=(
-                "You are an expert options trader specializing in pre-earnings setups. "
-                "Analyze the provided market data and recommend a single trade action. "
-                "Be decisive and data-driven. Respond with valid JSON only — no markdown."
+        response = retry_with_backoff(
+            lambda: client.messages.parse(
+                model=model,
+                max_tokens=512,
+                system=(
+                    "You are an expert options trader specializing in pre-earnings setups. "
+                    "Analyze the provided market data and recommend a single trade action. "
+                    "Be decisive and data-driven. Respond with valid JSON only — no markdown."
+                ),
+                messages=[{"role": "user", "content": prompt}],
+                output_format=_Output,
             ),
-            messages=[{"role": "user", "content": prompt}],
-            output_format=_Output,
+            label="claude-analysis",
         )
         out = response.parsed_output
         return ClaudeAnalysis(

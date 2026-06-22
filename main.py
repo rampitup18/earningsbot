@@ -75,6 +75,12 @@ def analyze(ticker: str, earnings_date: date):
         print(f"    {marker} [{s.name:20s}] dir={s.direction:+.2f} "
               f"conf={s.confidence:.0%}  {s.detail}")
 
+    # Gemini pre-screen: cheap filter before expensive Claude call
+    from data.gemini_earnings import prescreen_ticker
+    if not prescreen_ticker(ticker, spot, opts, hist, closes, hv30):
+        print("    ~ [gemini pre-screen] No clear edge — skipping")
+        return None
+
     # Claude makes the final call on action type
     claude = analyze_with_claude(
         ticker=ticker,
@@ -113,8 +119,14 @@ def analyze(ticker: str, earnings_date: date):
 
 
 def _discover_earnings() -> list[tuple[str, date]]:
-    from data.gemini_earnings import get_earnings_week_from_gemini
-    return get_earnings_week_from_gemini(days_ahead=EARNINGS_LOOKAHEAD_DAYS)
+    from data.gemini_earnings import get_earnings_week_from_gemini, get_earnings_week_from_claude
+
+    results = get_earnings_week_from_gemini(days_ahead=EARNINGS_LOOKAHEAD_DAYS)
+    if results:
+        return results
+
+    print("  Gemini failed — falling back to Claude Haiku for discovery")
+    return get_earnings_week_from_claude(days_ahead=EARNINGS_LOOKAHEAD_DAYS)
 
 
 def run(dry_run: bool = False, single_ticker: str | None = None) -> None:
@@ -143,7 +155,7 @@ def run(dry_run: bool = False, single_ticker: str | None = None) -> None:
         upcoming = _discover_earnings()
 
     if not upcoming:
-        print("No earnings found — check GEMINI_API_KEY in .env")
+        print("No earnings found — check GEMINI_API_KEY and ANTHROPIC_API_KEY in .env")
         return
 
     print(f"\nFound {len(upcoming)} earnings event(s):")
