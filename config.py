@@ -24,6 +24,9 @@ MAX_RISK_PCT = float(os.environ.get("MAX_RISK_PCT", 0.01))
 PORTFOLIO_SIZE = float(os.environ.get("PORTFOLIO_SIZE", 10000))
 MAX_TRADE_VALUE = float(os.environ.get("MAX_TRADE_VALUE", 100_000))
 
+# How many top tickers get analyzed by Opus (rest go to Haiku)
+OPUS_TICKER_COUNT = int(os.environ.get("OPUS_TICKER_COUNT", 3))
+
 # Minimum confidence to trigger a notification
 MIN_ALERT_CONFIDENCE = 0.25
 

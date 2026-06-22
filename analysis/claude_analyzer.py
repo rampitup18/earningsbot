@@ -1,8 +1,16 @@
 from __future__ import annotations
+import time
 from dataclasses import dataclass
 from datetime import date
 
 from pydantic import BaseModel
+
+_HAIKU = "claude-haiku-4-5"
+_SYSTEM = (
+    "Analyze the provided pre-earnings market data. "
+    "Recommend a single trade action based strictly on the numbers. "
+    "Respond with valid JSON only — no markdown."
+)
 
 
 @dataclass
@@ -12,6 +20,7 @@ class ClaudeAnalysis:
     confidence: float
     thesis: str
     key_factors: list[str]
+    model_used: str = ""
 
 
 class _Output(BaseModel):
@@ -104,6 +113,30 @@ def _build_prompt(
     return "\n".join(lines)
 
 
+def _call_claude(client, model: str, prompt: str) -> ClaudeAnalysis:
+    from utils import retry_with_backoff
+
+    response = retry_with_backoff(
+        lambda: client.messages.parse(
+            model=model,
+            max_tokens=512,
+            system=_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+            output_format=_Output,
+        ),
+        label=f"claude/{model}",
+    )
+    out = response.parsed_output
+    return ClaudeAnalysis(
+        action=out.action,
+        direction=out.direction,
+        confidence=float(out.confidence),
+        thesis=out.thesis,
+        key_factors=out.key_factors,
+        model_used=model,
+    )
+
+
 def analyze_with_claude(
     ticker: str,
     earnings_date: date,
@@ -113,51 +146,38 @@ def analyze_with_claude(
     hist_moves: list[dict],
     hist_summary: dict,
     closes: list[float],
+    model: str | None = None,
 ) -> ClaudeAnalysis | None:
-    """
-    Ask Claude to analyze a pre-earnings setup and recommend a trade.
-    Returns None if the API key is missing or the call fails.
-    """
-    from config import ANTHROPIC_API_KEY, CLAUDE_ANALYZER_MODEL as model
-    api_key = ANTHROPIC_API_KEY
-    if not api_key:
+    from config import ANTHROPIC_API_KEY, CLAUDE_ANALYZER_MODEL
+    if not ANTHROPIC_API_KEY:
         return None
 
     try:
         import anthropic
     except ImportError:
-        print("    ! anthropic not installed — run: pip install anthropic")
+        print("    ! anthropic not installed")
         return None
-    client = anthropic.Anthropic(api_key=api_key)
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     prompt = _build_prompt(
         ticker, earnings_date, spot, options, hv30, hist_moves, hist_summary, closes
     )
 
-    from utils import retry_with_backoff
+    use_model = model or CLAUDE_ANALYZER_MODEL
+    is_opus = "opus" in use_model
 
     try:
-        response = retry_with_backoff(
-            lambda: client.messages.parse(
-                model=model,
-                max_tokens=512,
-                system=(
-                    "Analyze the provided pre-earnings market data. "
-                    "Recommend a single trade action based strictly on the numbers. "
-                    "Respond with valid JSON only — no markdown."
-                ),
-                messages=[{"role": "user", "content": prompt}],
-                output_format=_Output,
-            ),
-            label="claude-analysis",
-        )
-        out = response.parsed_output
-        return ClaudeAnalysis(
-            action=out.action,
-            direction=out.direction,
-            confidence=float(out.confidence),
-            thesis=out.thesis,
-            key_factors=out.key_factors,
-        )
+        result = _call_claude(client, use_model, prompt)
+        if is_opus:
+            time.sleep(1)  # pace Opus calls
+        return result
     except Exception as exc:
-        print(f"    ! Claude error: {exc}")
-        return None
+        if use_model == _HAIKU:
+            print(f"    ! Haiku error: {exc}")
+            return None
+        print(f"    ~ {use_model} failed ({exc}) — falling back to Haiku")
+        try:
+            return _call_claude(client, _HAIKU, prompt)
+        except Exception as exc2:
+            print(f"    ! Haiku fallback also failed: {exc2}")
+            return None

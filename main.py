@@ -10,11 +10,13 @@ Usage:
 """
 from __future__ import annotations
 import argparse
-import os
 import time
 from datetime import datetime, date
 
-from config import MIN_ALERT_CONFIDENCE, SCHEDULE_HOUR, SCHEDULE_MINUTE, EARNINGS_LOOKAHEAD_DAYS
+from config import (
+    MIN_ALERT_CONFIDENCE, SCHEDULE_HOUR, SCHEDULE_MINUTE,
+    EARNINGS_LOOKAHEAD_DAYS, OPUS_TICKER_COUNT, CLAUDE_ANALYZER_MODEL,
+)
 from data.options import (
     get_spot_price,
     get_nearest_expiry_after,
@@ -35,7 +37,8 @@ from analysis.claude_analyzer import analyze_with_claude
 from alerts.notifier import notify_all
 
 
-def analyze(ticker: str, earnings_date: date):
+def _fetch_ticker_data(ticker: str, earnings_date: date) -> dict | None:
+    """Fetch all market data for a ticker. Returns a dict or None."""
     print(f"\n  {ticker} (earnings {earnings_date})")
 
     spot = get_spot_price(ticker)
@@ -43,70 +46,80 @@ def analyze(ticker: str, earnings_date: date):
         print("    ! Could not get spot price")
         return None
 
-    # Options are optional — Claude can still recommend go_long/go_short without them
     expiry = get_nearest_expiry_after(ticker, earnings_date)
     opts: dict = {}
     if expiry:
         opts = get_options_snapshot(ticker, expiry, spot)
         if not opts:
-            print("    ~ No options chain available — equity plays only")
+            print("    ~ No options chain — equity plays only")
     else:
-        print("    ~ No options expiry found — equity plays only")
+        print("    ~ No options expiry — equity plays only")
 
     hv30 = get_historical_vol(ticker)
-    iv_hv = opts["atm_iv"] / hv30 if hv30 > 0 and opts else 1.0
-
     past_moves = get_past_earnings_moves(ticker, n=10)
     hist = summarize_moves(past_moves, opts.get("expected_move_pct", 0.0))
     closes = get_price_history(ticker, days=25)
 
-    # Run traditional signals for display (skip IV signals when no options)
+    return {
+        "ticker": ticker,
+        "earnings_date": earnings_date,
+        "spot": spot,
+        "expiry": expiry,
+        "opts": opts,
+        "hv30": hv30,
+        "past_moves": past_moves,
+        "hist_summary": hist,
+        "closes": closes,
+    }
+
+
+def _analyze_ticker(data: dict, model: str) -> object | None:
+    """Run signals + Claude analysis on a pre-fetched data dict."""
+    ticker = data["ticker"]
+    opts = data["opts"]
+    hv30 = data["hv30"]
+    hist = data["hist_summary"]
+    closes = data["closes"]
+    iv_hv = opts["atm_iv"] / hv30 if hv30 > 0 and opts else 1.0
+
     signals = []
     if opts:
         signals.append(score_iv_skew(opts["put_iv"], opts["call_iv"]))
         signals.append(score_premium_value(hist["beat_implied_pct"], iv_hv))
-    signals.append(score_historical_direction(past_moves))
+    signals.append(score_historical_direction(data["past_moves"]))
     signals.append(score_price_drift(closes))
-
-    direction_score, confidence = aggregate_signals(signals) if signals else (0.0, 0.0)
 
     for s in signals:
         marker = ">>" if s.confidence >= 0.3 else "  "
         print(f"    {marker} [{s.name:20s}] dir={s.direction:+.2f} "
               f"conf={s.confidence:.0%}  {s.detail}")
 
-    # Gemini pre-screen: cheap filter before expensive Claude call
-    from data.gemini_earnings import prescreen_ticker
-    if not prescreen_ticker(ticker, spot, opts, hist, closes, hv30):
-        print("    ~ [gemini pre-screen] No clear edge — skipping")
-        return None
-
-    # Claude makes the final call on action type
     claude = analyze_with_claude(
         ticker=ticker,
-        earnings_date=earnings_date,
-        spot=spot,
+        earnings_date=data["earnings_date"],
+        spot=data["spot"],
         options=opts,
         hv30=hv30,
         hist_moves=hist.get("moves", []),
         hist_summary=hist,
         closes=closes,
+        model=model,
     )
 
     if not claude:
         print("    ! Claude unavailable — check ANTHROPIC_API_KEY")
         return None
 
-    from config import CLAUDE_ANALYZER_MODEL
-    print(f"    >> [claude/{CLAUDE_ANALYZER_MODEL}] "
+    print(f"    >> [claude/{claude.model_used}] "
           f"action={claude.action} dir={claude.direction} conf={claude.confidence:.0%}")
     for factor in claude.key_factors:
         print(f"       • {factor}")
+
     rec = build_from_claude(
         ticker=ticker,
-        earnings_date=earnings_date,
-        expiry=expiry or "",
-        spot=spot,
+        earnings_date=data["earnings_date"],
+        expiry=data["expiry"] or "",
+        spot=data["spot"],
         options=opts,
         iv_hv_ratio=iv_hv,
         claude_analysis=claude,
@@ -162,10 +175,40 @@ def run(dry_run: bool = False, single_ticker: str | None = None) -> None:
     for ticker, d in upcoming:
         print(f"  {ticker}: {d}")
 
+    # Phase 1: Fetch market data for all tickers
+    print("\nFetching market data...")
+    all_data: list[dict] = []
+    for ticker, edate in upcoming:
+        data = _fetch_ticker_data(ticker, edate)
+        if data:
+            all_data.append(data)
+        time.sleep(0.5)
+
+    if not all_data:
+        print("No tickers with valid market data.")
+        return
+
+    # Phase 2: Gemini ranks tickers — top N go to Opus, rest to Haiku
+    if single_ticker:
+        opus_tickers = {single_ticker}
+    else:
+        from data.gemini_earnings import rank_tickers
+        opus_tickers = rank_tickers(all_data, top_n=OPUS_TICKER_COUNT)
+
+    opus_model = CLAUDE_ANALYZER_MODEL
+    haiku_model = "claude-haiku-4-5"
+
+    opus_count = sum(1 for d in all_data if d["ticker"] in opus_tickers)
+    haiku_count = len(all_data) - opus_count
+    print(f"\n  Routing: {opus_count} tickers → {opus_model}, {haiku_count} tickers → {haiku_model}")
+
+    # Phase 3: Analyze — Opus for high-vol, Haiku for the rest
     print("\nAnalyzing...")
     recs = []
-    for ticker, edate in upcoming:
-        rec = analyze(ticker, edate)
+    for data in all_data:
+        model = opus_model if data["ticker"] in opus_tickers else haiku_model
+        print(f"\n  {data['ticker']} → {model}")
+        rec = _analyze_ticker(data, model)
         if rec:
             recs.append(rec)
         time.sleep(0.5)
@@ -175,7 +218,7 @@ def run(dry_run: bool = False, single_ticker: str | None = None) -> None:
     print(f"Actionable setups: {len(actionable)} / {len(recs)}")
 
     if dry_run:
-        print("(dry-run mode — SMS suppressed)\n")
+        print("(dry-run mode — notifications suppressed)\n")
         from alerts.notifier import format_message
         for r in actionable:
             title, body = format_message(r)

@@ -141,44 +141,50 @@ def get_earnings_week_from_claude(days_ahead: int = 7) -> list[tuple[str, date]]
         return []
 
 
-def prescreen_ticker(
-    ticker: str,
-    spot: float,
-    opts: dict,
-    hist_summary: dict,
-    closes: list[float],
-    hv30: float,
-) -> bool:
-    """Quick Gemini check: is this ticker worth deep Claude analysis?"""
+def rank_tickers(ticker_data: list[dict], top_n: int = 3) -> set[str]:
+    """
+    Batch-rank tickers by volatility and profit potential using one Gemini call.
+    Returns the top_n tickers that should get Opus-level analysis.
+    """
     from config import GEMINI_API_KEY
-    if not GEMINI_API_KEY:
-        return True  # no Gemini = send everything to Claude
+    if not GEMINI_API_KEY or not ticker_data:
+        return set()
 
     try:
         from google import genai
         from google.genai.types import GenerateContentConfig
     except ImportError:
-        return True
+        return set()
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-    has_opts = bool(opts)
-    iv_hv = opts.get("atm_iv", 0) / hv30 if hv30 > 0 and has_opts else None
-    drift = (closes[-1] - closes[0]) / closes[0] if len(closes) >= 2 else 0.0
 
-    data = f"TICKER: {ticker} | SPOT: ${spot:.2f} | DRIFT: {drift:+.1%}"
-    if has_opts:
-        data += (f" | IV/HV: {iv_hv:.2f}x"
-                 f" | IV_SKEW: {opts.get('iv_skew', 0):+.1%}"
-                 f" | EXPECTED_MOVE: ±{opts.get('expected_move_pct', 0):.1%}")
-    data += (f" | HIST_UP: {hist_summary.get('up_pct', 0):.0%}"
-             f" | AVG_MOVE: {hist_summary.get('avg_abs_move', 0):.1%}"
-             f" | BEAT_IMPLIED: {hist_summary.get('beat_implied_pct', 0):.0%}")
+    lines = []
+    for d in ticker_data:
+        opts = d.get("opts", {})
+        closes = d.get("closes", [])
+        hv30 = d.get("hv30", 0)
+        has_opts = bool(opts)
+        iv_hv = opts.get("atm_iv", 0) / hv30 if hv30 > 0 and has_opts else 0
+        drift = (closes[-1] - closes[0]) / closes[0] if len(closes) >= 2 else 0.0
+        hist = d.get("hist_summary", {})
+
+        line = f"{d['ticker']}: spot=${d['spot']:.0f}, drift={drift:+.1%}"
+        if has_opts:
+            line += (f", IV/HV={iv_hv:.1f}x"
+                     f", expected_move=±{opts.get('expected_move_pct', 0):.1%}"
+                     f", iv_skew={opts.get('iv_skew', 0):+.1%}")
+        line += (f", avg_move={hist.get('avg_abs_move', 0):.1%}"
+                 f", up={hist.get('up_pct', 0):.0%}"
+                 f", beat_implied={hist.get('beat_implied_pct', 0):.0%}")
+        lines.append(line)
 
     prompt = (
-        f"{data}\n\n"
-        "Is there a clear pre-earnings trade here (directional bias, "
-        "mispriced options, or strong historical pattern)? "
-        "Reply with ONLY the word YES or NO."
+        "Here are stocks reporting earnings this week with their market data:\n\n"
+        + "\n".join(lines)
+        + f"\n\nPick the {top_n} tickers with the highest volatility, widest expected moves, "
+        "strongest directional signals, or most mispriced options — the ones most likely "
+        "to produce a significant profit or loss.\n"
+        f'Return ONLY valid JSON: {{"high_priority": ["TICK1", "TICK2", "TICK3"]}}'
     )
 
     try:
@@ -188,10 +194,21 @@ def prescreen_ticker(
                 contents=prompt,
                 config=GenerateContentConfig(response_modalities=["TEXT"]),
             ),
-            label="gemini-prescreen",
+            label="gemini-rank",
         )
-        answer = (response.text or "").strip().upper()
-        time.sleep(0.5)  # pace pre-screen calls
-        return answer.startswith("YES")
-    except Exception:
-        return True  # on error, pass through to Claude
+
+        text = (response.text or "").strip()
+        text = re.sub(r"^```(?:json)?\s*\n?", "", text, flags=re.MULTILINE)
+        text = re.sub(r"\n?```\s*$", "", text, flags=re.MULTILINE)
+        match = re.search(r"\{[\s\S]*\}", text.strip())
+        if match:
+            text = match.group()
+
+        result = json.loads(text)
+        top = {str(t).strip().upper() for t in result.get("high_priority", [])}
+        print(f"  [gemini-rank] High priority for Opus: {', '.join(sorted(top))}")
+        return top
+
+    except Exception as exc:
+        print(f"  [gemini-rank] Error: {exc} — all tickers will use Haiku")
+        return set()
