@@ -196,17 +196,17 @@ def run(dry_run: bool = False, single_ticker: str | None = None) -> None:
         opus_tickers = rank_tickers(all_data, top_n=OPUS_TICKER_COUNT)
 
     opus_model = CLAUDE_ANALYZER_MODEL
-    haiku_model = "claude-haiku-4-5"
+    sonnet_model = "claude-sonnet-4-6"
 
     opus_count = sum(1 for d in all_data if d["ticker"] in opus_tickers)
-    haiku_count = len(all_data) - opus_count
-    print(f"\n  Routing: {opus_count} tickers → {opus_model}, {haiku_count} tickers → {haiku_model}")
+    sonnet_count = len(all_data) - opus_count
+    print(f"\n  Routing: {opus_count} tickers → {opus_model}, {sonnet_count} tickers → {sonnet_model}")
 
-    # Phase 3: Analyze — Opus for high-vol, Haiku for the rest
+    # Phase 3: Analyze — Opus for high-vol, Sonnet for the rest
     print("\nAnalyzing...")
     recs = []
     for data in all_data:
-        model = opus_model if data["ticker"] in opus_tickers else haiku_model
+        model = opus_model if data["ticker"] in opus_tickers else sonnet_model
         print(f"\n  {data['ticker']} → {model}")
         rec = _analyze_ticker(data, model)
         if rec:

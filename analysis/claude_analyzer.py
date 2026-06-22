@@ -5,7 +5,7 @@ from datetime import date
 
 from pydantic import BaseModel
 
-_HAIKU = "claude-haiku-4-5"
+_FALLBACK = "claude-sonnet-4-6"
 _SYSTEM = (
     "Analyze the provided pre-earnings market data. "
     "Recommend a single trade action based strictly on the numbers. "
@@ -172,12 +172,12 @@ def analyze_with_claude(
             time.sleep(1)  # pace Opus calls
         return result
     except Exception as exc:
-        if use_model == _HAIKU:
+        if use_model == _FALLBACK:
             print(f"    ! Haiku error: {exc}")
             return None
         print(f"    ~ {use_model} failed ({exc}) — falling back to Haiku")
         try:
-            return _call_claude(client, _HAIKU, prompt)
+            return _call_claude(client, _FALLBACK, prompt)
         except Exception as exc2:
             print(f"    ! Haiku fallback also failed: {exc2}")
             return None
