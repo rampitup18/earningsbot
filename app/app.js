@@ -60,7 +60,8 @@ function parseBody(body) {
 }
 
 async function fetchTrades(topic) {
-  const res = await fetch(`${NTFY_SERVER}/${topic}/json?poll=1&since=7d`);
+  const since = Math.floor(Date.now() / 1000) - 7 * 86400;
+  const res = await fetch(`${NTFY_SERVER}/${topic}/json?poll=1&since=${since}`);
   if (!res.ok) throw new Error(`ntfy error: ${res.status}`);
   const text = await res.text();
   const msgs = text.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -139,7 +140,7 @@ const $subtitle = () => document.getElementById("subtitle");
 async function loadTrades() {
   const topic = getTopic();
   if (!topic) {
-    $content().innerHTML = `<div class="center-state"><h2>No topic configured</h2><p>Tap the gear icon to enter your ntfy topic</p></div>`;
+    $content().innerHTML = `<div class="center-state"><h2>Not connected</h2><p>Tap the gear icon to enter your access code</p></div>`;
     return;
   }
 
